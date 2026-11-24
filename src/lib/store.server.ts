@@ -3,6 +3,12 @@ import type { Category, Coupon, OrderSummary, Post, Product, Variation } from ".
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const num = (v: any) => (v === "" || v == null ? 0 : Number(v));
 
+function minorToMajor(value: any, minorUnit: number): number {
+  const raw = num(value);
+  if (!raw) return 0;
+  return minorUnit > 0 ? raw / 10 ** minorUnit : raw;
+}
+
 export function mapProduct(p: any): Product {
   const images: string[] = (p.images ?? []).map((i: any) => i.src);
   return {
@@ -26,6 +32,39 @@ export function mapProduct(p: any): Product {
   };
 }
 
+/** Maps a WooCommerce Store API v1 (/wp-json/wc/store/v1/products) product to DTO. */
+export function mapStoreApiProduct(p: any): Product {
+  const images: string[] = (p.images ?? []).map((i: any) => i.src).filter(Boolean);
+  const minor = Number(p.prices?.currency_minor_unit ?? 0);
+  const price = minorToMajor(p.prices?.price, minor);
+  const regularPrice = minorToMajor(p.prices?.regular_price || p.prices?.price, minor);
+
+  return {
+    id: p.id,
+    name: p.name,
+    slug: p.slug,
+    price,
+    regularPrice: regularPrice || price,
+    onSale: !!p.on_sale,
+    inStock: p.is_in_stock !== false,
+    image: images[0] ?? null,
+    images,
+    shortDescription: p.short_description ?? "",
+    description: p.description ?? "",
+    categories: (p.categories ?? []).map((c: any) => ({ id: c.id, name: c.name, slug: c.slug })),
+    type: p.type ?? "simple",
+    attributes: (p.attributes ?? [])
+      .filter((a: any) => a.has_variations)
+      .map((a: any) => ({
+        name: a.name,
+        options: (a.terms ?? []).map((t: any) => t.name).filter(Boolean),
+      })),
+    variations: (p.variations ?? [])
+      .map((v: any) => (typeof v === "number" ? v : v.id))
+      .filter((id: any) => typeof id === "number"),
+  };
+}
+
 export function mapVariation(v: any): Variation {
   return {
     id: v.id,
@@ -33,6 +72,26 @@ export function mapVariation(v: any): Variation {
     inStock: v.stock_status !== "outofstock",
     image: v.image?.src ?? null,
     attributes: (v.attributes ?? []).map((a: any) => ({ name: a.name, option: a.option })),
+  };
+}
+
+/** Maps a WooCommerce Store API v1 variation product payload to DTO. */
+export function mapStoreApiVariation(v: any, fallbackAttrs: { name: string; value?: string }[] = []): Variation {
+  const minor = Number(v.prices?.currency_minor_unit ?? 0);
+  const attrs =
+    Array.isArray(v.attributes) && v.attributes.length
+      ? v.attributes.map((a: any) => ({
+          name: a.name,
+          option: a.option ?? a.value ?? a.terms?.[0]?.name ?? "",
+        }))
+      : fallbackAttrs.map((a) => ({ name: a.name, option: a.value ?? "" }));
+
+  return {
+    id: v.id,
+    price: minorToMajor(v.prices?.price, minor),
+    inStock: v.is_in_stock !== false,
+    image: v.images?.[0]?.src ?? v.image?.src ?? null,
+    attributes: attrs,
   };
 }
 

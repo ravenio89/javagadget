@@ -2,9 +2,19 @@
 import { createServerFn } from "@tanstack/react-start";
 import { notFound } from "@tanstack/react-router";
 import { z } from "zod";
-import { cached, gatewayFetch } from "./gateway.server";
-import { isCouponActive, mapCoupon, mapCategory, mapOrder, mapPost, mapProduct, mapVariation } from "./store.server";
-import type { Coupon, Category, Paged, PostCategory, Product, Post, ShippingMethod } from "./types";
+import { cached, gatewayFetch, hasWooCredentials } from "./gateway.server";
+import {
+  isCouponActive,
+  mapCategory,
+  mapCoupon,
+  mapOrder,
+  mapPost,
+  mapProduct,
+  mapStoreApiProduct,
+  mapStoreApiVariation,
+  mapVariation,
+} from "./store.server";
+import type { Category, Coupon, Paged, Post, PostCategory, Product, ShippingMethod, Variation } from "./types";
 
 const MIN = 60_000;
 
@@ -23,10 +33,26 @@ export const getProducts = createServerFn({ method: "GET" })
       .parse(d),
   )
   .handler(async ({ data }): Promise<Paged<Product>> => {
-    return cached(`products:${JSON.stringify(data)}`, MIN, async () => {
-      const r = await gatewayFetch("woocommerce", "/products", {
+    const useV3 = hasWooCredentials();
+    return cached(`products:${useV3 ? "v3" : "store"}:${JSON.stringify(data)}`, MIN, async () => {
+      if (useV3) {
+        const r = await gatewayFetch("woocommerce", "/products", {
+          query: {
+            status: "publish",
+            page: data.page,
+            per_page: data.perPage,
+            category: data.category,
+            search: data.search,
+            featured: data.featured ? "true" : undefined,
+            orderby: data.orderby,
+            order: data.order,
+          },
+        });
+        return { items: r.data.map(mapProduct), total: r.total, totalPages: r.totalPages };
+      }
+
+      const r = await gatewayFetch("woocommerce-store", "/products", {
         query: {
-          status: "publish",
           page: data.page,
           per_page: data.perPage,
           category: data.category,
@@ -36,32 +62,73 @@ export const getProducts = createServerFn({ method: "GET" })
           order: data.order,
         },
       });
-      return { items: r.data.map(mapProduct), total: r.total, totalPages: r.totalPages };
+      const items = (r.data as any[]).map(mapStoreApiProduct);
+      return { items, total: r.total || items.length, totalPages: r.totalPages || 1 };
     });
   });
 
 export const getProduct = createServerFn({ method: "GET" })
   .inputValidator((d) => z.object({ slug: z.string().min(1).max(200) }).parse(d))
   .handler(async ({ data }) => {
-    return cached(`product:${data.slug}`, MIN, async () => {
-      const r = await gatewayFetch("woocommerce", "/products", { query: { slug: data.slug } });
-      if (!r.data[0]) throw notFound();
-      const product = mapProduct(r.data[0]);
-      let variations: ReturnType<typeof mapVariation>[] = [];
-      if (product.type === "variable" && product.variations.length) {
-        const v = await gatewayFetch("woocommerce", `/products/${product.id}/variations`, { query: { per_page: 100 } });
-        variations = v.data.map(mapVariation);
+    const useV3 = hasWooCredentials();
+    return cached(`product:${useV3 ? "v3" : "store"}:${data.slug}`, MIN, async () => {
+      if (useV3) {
+        const r = await gatewayFetch("woocommerce", "/products", { query: { slug: data.slug } });
+        if (!r.data[0]) throw notFound();
+        const product = mapProduct(r.data[0]);
+        let variations: Variation[] = [];
+        if (product.type === "variable" && product.variations.length) {
+          const v = await gatewayFetch("woocommerce", `/products/${product.id}/variations`, {
+            query: { per_page: 100 },
+          });
+          variations = v.data.map(mapVariation);
+        }
+        return { product, variations };
+      }
+
+      const r = await gatewayFetch("woocommerce-store", "/products", { query: { slug: data.slug } });
+      const raw = r.data?.[0];
+      if (!raw) throw notFound();
+      const product = mapStoreApiProduct(raw);
+      let variations: Variation[] = [];
+      if (product.type === "variable" && Array.isArray(raw.variations) && raw.variations.length) {
+        const rawVars = (raw.variations as { id: number; attributes?: { name: string; value?: string }[] }[]).slice(
+          0,
+          50,
+        );
+        const fetched = await Promise.all(
+          rawVars.map(async (rv) => {
+            try {
+              const res = await gatewayFetch("woocommerce-store", `/products/${rv.id}`);
+              return mapStoreApiVariation(res.data, rv.attributes ?? []);
+            } catch {
+              return null;
+            }
+          }),
+        );
+        variations = fetched.filter((v): v is Variation => v !== null);
       }
       return { product, variations };
     });
   });
 
 export const getCategories = createServerFn({ method: "GET" }).handler(async (): Promise<Category[]> => {
-  return cached("categories", 5 * MIN, async () => {
-    const r = await gatewayFetch("woocommerce", "/products/categories", {
-      query: { per_page: 100, hide_empty: "true", orderby: "count", order: "desc" },
+  const useV3 = hasWooCredentials();
+  return cached(`categories:${useV3 ? "v3" : "store"}`, 5 * MIN, async () => {
+    if (useV3) {
+      const r = await gatewayFetch("woocommerce", "/products/categories", {
+        query: { per_page: 100, hide_empty: "true", orderby: "count", order: "desc" },
+      });
+      return r.data.map(mapCategory).filter((c: { slug: string }) => c.slug !== "uncategorized");
+    }
+
+    const r = await gatewayFetch("woocommerce-store", "/products/categories", {
+      query: { per_page: 100 },
     });
-    return r.data.map(mapCategory).filter((c: { slug: string }) => c.slug !== "uncategorized");
+    return (r.data as any[])
+      .map(mapCategory)
+      .filter((c) => c.count > 0 && c.slug !== "uncategorized")
+      .sort((a, b) => b.count - a.count);
   });
 });
 
@@ -120,6 +187,7 @@ export const getPage = createServerFn({ method: "GET" })
   .handler(({ data }) => getBySlug("pages", data.slug));
 
 async function loadShippingMethods(): Promise<ShippingMethod[]> {
+  if (!hasWooCredentials()) return [];
   return cached("shipping", 10 * MIN, async () => {
     const zones = await gatewayFetch("woocommerce", "/shipping/zones");
     const all: ShippingMethod[] = [];
@@ -128,9 +196,12 @@ async function loadShippingMethods(): Promise<ShippingMethod[]> {
       for (const method of m.data as any[]) {
         if (!method.enabled) continue;
         const raw = method.settings?.cost?.value;
-        const cost = method.method_id === "free_shipping" || method.method_id === "local_pickup"
-          ? Number(raw || 0)
-          : raw && !isNaN(Number(raw)) ? Number(raw) : null;
+        const cost =
+          method.method_id === "free_shipping" || method.method_id === "local_pickup"
+            ? Number(raw || 0)
+            : raw && !isNaN(Number(raw))
+              ? Number(raw)
+              : null;
         const id = `${method.method_id}:${method.instance_id}`;
         if (!all.some((x) => x.title === method.title)) all.push({ id, title: method.title, cost });
       }
@@ -160,7 +231,13 @@ export const createOrder = createServerFn({ method: "POST" })
         note: z.string().max(500).default(""),
         shippingId: z.string().max(100).optional(),
         items: z
-          .array(z.object({ productId: z.number().int(), variationId: z.number().int().optional(), quantity: z.number().int().min(1).max(99) }))
+          .array(
+            z.object({
+              productId: z.number().int(),
+              variationId: z.number().int().optional(),
+              quantity: z.number().int().min(1).max(99),
+            }),
+          )
           .min(1)
           .max(50),
       })
@@ -172,7 +249,11 @@ export const createOrder = createServerFn({ method: "POST" })
     if (data.shippingId) {
       const methods = await loadShippingMethods();
       const m = methods.find((x) => x.id === data.shippingId);
-      if (m) shipping_lines = [{ method_id: m.id.split(":")[0] ?? m.id, method_title: m.title, total: String(m.cost ?? 0) }];
+      if (m) {
+        shipping_lines = [
+          { method_id: m.id.split(":")[0] ?? m.id, method_title: m.title, total: String(m.cost ?? 0) },
+        ];
+      }
     }
     const a = data.address;
     const r = await gatewayFetch("woocommerce", "/orders", {
@@ -181,9 +262,21 @@ export const createOrder = createServerFn({ method: "POST" })
         status: "pending",
         set_paid: false,
         billing: { ...a, country: "ID" },
-        shipping: { first_name: a.first_name, last_name: a.last_name, address_1: a.address_1, city: a.city, state: a.state, postcode: a.postcode, country: "ID" },
+        shipping: {
+          first_name: a.first_name,
+          last_name: a.last_name,
+          address_1: a.address_1,
+          city: a.city,
+          state: a.state,
+          postcode: a.postcode,
+          country: "ID",
+        },
         customer_note: data.note,
-        line_items: data.items.map((i) => ({ product_id: i.productId, variation_id: i.variationId, quantity: i.quantity })),
+        line_items: data.items.map((i) => ({
+          product_id: i.productId,
+          variation_id: i.variationId,
+          quantity: i.quantity,
+        })),
         shipping_lines,
         meta_data: [{ key: "_created_via_headless", value: "yes" }],
       },
@@ -197,6 +290,9 @@ export const lookupOrders = createServerFn({ method: "POST" })
     z.object({ email: z.string().trim().email().max(200), orderNumber: z.string().trim().regex(/^\d{1,12}$/) }).parse(d),
   )
   .handler(async ({ data }) => {
+    if (!hasWooCredentials()) {
+      return { ok: false as const, orders: [] };
+    }
     // Require both order number AND matching billing email before showing anything.
     const one = await gatewayFetch("woocommerce", `/orders/${data.orderNumber}`).catch(() => null);
     const email = data.email.toLowerCase();
@@ -213,6 +309,7 @@ export const lookupOrders = createServerFn({ method: "POST" })
   });
 
 export const getCoupons = createServerFn({ method: "GET" }).handler(async (): Promise<Coupon[]> => {
+  if (!hasWooCredentials()) return [];
   return cached("coupons", 5 * MIN, async () => {
     const r = await gatewayFetch("woocommerce", "/coupons", { query: { per_page: 50 } });
     return (r.data as any[]).filter((c) => isCouponActive(c)).map(mapCoupon);

@@ -4,11 +4,12 @@
  * WordPress + WooCommerce connections. No other code changes needed.
  */
 export const siteConfig = {
-  name: "ORBIT GLOBAL TECHNOLOGY",
-  tagline: "Laptop, PC & aksesori teknologi pilihan",
+  name: "JavaGadget",
+  tagline: "Gadget, Laptop & Aksesori Teknologi Pilihan",
   description:
-    "Belanja laptop gaming, PC, dan aksesori original dengan harga terbaik dan pengiriman ke seluruh Indonesia.",
-  storeUrl: "https://orbit.co.id",
+    "Belanja gadget, smartphone, laptop, dan aksesori original dengan harga terbaik dan pengiriman ke seluruh Indonesia.",
+  siteUrl: "https://javagadget.com",
+  storeUrl: "https://store.javagadget.com",
   locale: "id-ID",
   currency: "IDR",
   country: "ID",

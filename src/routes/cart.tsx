@@ -29,7 +29,7 @@ const field = "h-11 w-full rounded-lg border border-input bg-card px-4 text-sm o
 function CartPage() {
   const items = useCart();
   const navigate = useNavigate();
-  const { data: methods = [] } = useQuery(shippingQuery());
+  const { data: methods = [], isLoading: loadingMethods } = useQuery(shippingQuery());
   const [shippingId, setShippingId] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const submit = useServerFn(createOrder);
@@ -124,7 +124,12 @@ function CartPage() {
         <aside className="h-fit space-y-5 rounded-2xl border border-border bg-card p-6 lg:sticky lg:top-24">
           <h2 className="text-lg font-bold">Pengiriman</h2>
           <div className="space-y-2">
-            {methods.length === 0 && <p className="text-sm text-muted-foreground">Memuat metode pengiriman…</p>}
+            {loadingMethods && <p className="text-sm text-muted-foreground">Memuat metode pengiriman…</p>}
+            {!loadingMethods && methods.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                Metode pengiriman belum tersedia. Pastikan zona pengiriman &amp; API WooCommerce sudah aktif di {siteConfig.storeUrl}.
+              </p>
+            )}
             {methods.map((m) => (
               <label key={m.id} className={`flex cursor-pointer items-center justify-between rounded-lg border p-3 text-sm ${shippingId === m.id ? "border-foreground" : "border-border"}`}>
                 <span className="flex items-center gap-2">

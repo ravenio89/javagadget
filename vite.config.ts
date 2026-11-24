@@ -5,8 +5,19 @@
 //     React/TanStack dedupe, error logger plugins, and sandbox detection (port/host/strictPort).
 // You can pass additional config via defineConfig({ vite: { ... }, etc... }) if needed.
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
+import { loadEnv } from "vite";
+
+// Load server-side .env variables (WP_SITE_URL, WC_CONSUMER_KEY, WC_CONSUMER_SECRET)
+// into process.env during local dev/preview without exposing them to the client bundle.
+const fileEnv = loadEnv(process.env["NODE_ENV"] ?? "development", process.cwd(), "");
+for (const [k, v] of Object.entries(fileEnv)) {
+  if (process.env[k] === undefined) process.env[k] = v;
+}
 
 export default defineConfig({
+  nitro: {
+    preset: process.env["NITRO_PRESET"] ?? "node-server",
+  },
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this
