@@ -273,7 +273,7 @@ describe("biteship.server shipping integration", () => {
     expect(parsedBody.destination_postal_code).toBe(12190);
   });
 
-  it("returns fallback courier options when Biteship wallet balance is empty (HTTP 402)", async () => {
+  it("calculates numeric shipping rates by destination zone when Biteship wallet balance is empty (HTTP 402)", async () => {
     process.env["BITESHIP_API_KEY"] = "biteship_live.test_token";
     vi.stubGlobal(
       "fetch",
@@ -291,11 +291,13 @@ describe("biteship.server shipping integration", () => {
 
     const res = await fetchBiteshipRates({
       destinationPostalCode: "12190",
-      items: [{ name: "Projector ACER", price: 5200000, quantity: 1 }],
+      items: [{ name: "Projector ACER", price: 5200000, quantity: 2 }],
     });
 
     expect(res.ok).toBe(true);
+    expect(res.weightKg).toBe(2);
+    expect(res.zoneLabel).toBe("Jabodetabek, Jawa Barat & Banten");
     expect(res.methods.length).toBeGreaterThan(0);
-    expect(res.methods[0]?.cost).toBeNull();
+    expect(res.methods[0]?.cost).toBe(34000); // Rp 17.000/kg * 2 kg (SiCepat HALU)
   });
 });
