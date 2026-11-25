@@ -14,6 +14,13 @@ export const siteConfig = {
   currency: "IDR",
   country: "ID",
   whatsapp: "",
+  origin: {
+    address: "Jl.Genuk Perbalan X No.5 Tegalsari",
+    city: "Semarang",
+    state: "Jawa Tengah",
+    postalCode: 50614,
+    defaultWeightGrams: 1000,
+  },
   nav: [
     { label: "Shop", to: "/shop" },
     { label: "Insights", to: "/blog" },

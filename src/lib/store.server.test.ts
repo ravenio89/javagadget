@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { fetchBiteshipRates, getOriginPostalCode, mapBiteshipPricing } from "./biteship.server";
 import { getStoreBaseUrl, hasWooCredentials, rawStoreFetch } from "./gateway.server";
 import {
   isCouponActive,
@@ -189,5 +190,112 @@ describe("store.server mappers", () => {
     expect(isCouponActive({ status: "publish", date_expires_gmt: "2026-12-01T00:00:00" }, now)).toBe(true);
     expect(isCouponActive({ status: "publish", date_expires_gmt: "2026-11-01T00:00:00" }, now)).toBe(false);
     expect(isCouponActive({ status: "publish", usage_limit: 10, usage_count: 10 }, now)).toBe(false);
+  });
+});
+
+describe("biteship.server shipping integration", () => {
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+    vi.unstubAllGlobals();
+  });
+
+  it("uses Semarang store origin postal code 50614 by default", () => {
+    delete process.env["BITESHIP_ORIGIN_POSTAL_CODE"];
+    expect(getOriginPostalCode()).toBe(50614);
+  });
+
+  it("maps and sorts Biteship pricing payload by lowest cost", () => {
+    const methods = mapBiteshipPricing([
+      {
+        courier_code: "jne",
+        courier_name: "JNE",
+        courier_service_code: "yes",
+        courier_service_name: "YES",
+        duration: "1 - 2 hari",
+        price: 32000,
+      },
+      {
+        courier_code: "sicepat",
+        courier_name: "SiCepat",
+        courier_service_code: "reg",
+        courier_service_name: "REG",
+        duration: "2 - 3 hari",
+        price: 18000,
+      },
+    ]);
+
+    expect(methods).toEqual([
+      { id: "biteship:sicepat:reg", title: "SiCepat REG (2 - 3 hari)", cost: 18000 },
+      { id: "biteship:jne:yes", title: "JNE YES (1 - 2 hari)", cost: 32000 },
+    ]);
+  });
+
+  it("posts origin_postal_code 50614 and destination_postal_code to Biteship rates endpoint", async () => {
+    process.env["BITESHIP_API_KEY"] = "biteship_live.test_token";
+    delete process.env["BITESHIP_ORIGIN_POSTAL_CODE"];
+
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          success: true,
+          pricing: [
+            {
+              courier_code: "jne",
+              courier_name: "JNE",
+              courier_service_code: "reg",
+              courier_service_name: "Reguler",
+              duration: "1 - 2 hari",
+              price: 19000,
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", mockFetch);
+
+    const res = await fetchBiteshipRates({
+      destinationPostalCode: "12190",
+      items: [{ name: "Projector ACER", price: 5200000, quantity: 1 }],
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.methods).toEqual([
+      { id: "biteship:jne:reg", title: "JNE Reguler (1 - 2 hari)", cost: 19000 },
+    ]);
+
+    const [calledUrl, calledInit] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(calledUrl).toBe("https://api.biteship.com/v1/rates/couriers");
+    const parsedBody = JSON.parse(String(calledInit.body));
+    expect(parsedBody.origin_postal_code).toBe(50614);
+    expect(parsedBody.destination_postal_code).toBe(12190);
+  });
+
+  it("returns fallback courier options when Biteship wallet balance is empty (HTTP 402)", async () => {
+    process.env["BITESHIP_API_KEY"] = "biteship_live.test_token";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            success: false,
+            code: 40200000,
+            error: "Rates API requests are charged IDR 5 each. Top up your balance to keep going.",
+          }),
+          { status: 402, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
+    const res = await fetchBiteshipRates({
+      destinationPostalCode: "12190",
+      items: [{ name: "Projector ACER", price: 5200000, quantity: 1 }],
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.methods.length).toBeGreaterThan(0);
+    expect(res.methods[0]?.cost).toBeNull();
   });
 });

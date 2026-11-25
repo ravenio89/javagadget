@@ -2,6 +2,8 @@
 import { createServerFn } from "@tanstack/react-start";
 import { notFound } from "@tanstack/react-router";
 import { z } from "zod";
+import { siteConfig } from "@/config/site.config";
+import { fetchBiteshipRates } from "./biteship.server";
 import { cached, gatewayFetch, hasWooCredentials } from "./gateway.server";
 import {
   isCouponActive,
@@ -212,6 +214,33 @@ async function loadShippingMethods(): Promise<ShippingMethod[]> {
 
 export const getShippingMethods = createServerFn({ method: "GET" }).handler(() => loadShippingMethods());
 
+const biteshipItemSchema = z.object({
+  name: z.string().max(150).optional(),
+  price: z.number().min(0).optional(),
+  quantity: z.number().int().min(1).max(99),
+});
+
+export const getBiteshipRates = createServerFn({ method: "POST" })
+  .inputValidator((d) =>
+    z
+      .object({
+        postalCode: z.string().trim().max(20).optional(),
+        city: z.string().trim().max(100).optional(),
+        items: z.array(biteshipItemSchema).min(1).max(50),
+      })
+      .parse(d),
+  )
+  .handler(async ({ data }) => {
+    const cacheKey = `biteship:${data.postalCode ?? ""}:${(data.city ?? "").toLowerCase()}:${data.items.reduce((n, i) => n + i.quantity, 0)}`;
+    return cached(cacheKey, 2 * MIN, () =>
+      fetchBiteshipRates({
+        destinationPostalCode: data.postalCode,
+        destinationCity: data.city,
+        items: data.items,
+      }),
+    );
+  });
+
 const addressSchema = z.object({
   first_name: z.string().trim().min(1).max(80),
   last_name: z.string().trim().max(80).default(""),
@@ -236,6 +265,8 @@ export const createOrder = createServerFn({ method: "POST" })
               productId: z.number().int(),
               variationId: z.number().int().optional(),
               quantity: z.number().int().min(1).max(99),
+              name: z.string().max(150).optional(),
+              price: z.number().min(0).optional(),
             }),
           )
           .min(1)
@@ -244,15 +275,46 @@ export const createOrder = createServerFn({ method: "POST" })
       .parse(d),
   )
   .handler(async ({ data }) => {
-    // Shipping cost is taken from the server-side method list, never from the client.
+    // Shipping cost is taken from the server-side method list / Biteship API, never from the client.
     let shipping_lines: { method_id: string; method_title: string; total: string }[] = [];
+    const extraMeta: { key: string; value: string }[] = [
+      { key: "_created_via_headless", value: "yes" },
+      {
+        key: "_store_origin",
+        value: `${siteConfig.origin.address}, ${siteConfig.origin.city} ${siteConfig.origin.state} ${siteConfig.origin.postalCode}`,
+      },
+    ];
+
     if (data.shippingId) {
-      const methods = await loadShippingMethods();
-      const m = methods.find((x) => x.id === data.shippingId);
-      if (m) {
-        shipping_lines = [
-          { method_id: m.id.split(":")[0] ?? m.id, method_title: m.title, total: String(m.cost ?? 0) },
-        ];
+      if (data.shippingId.startsWith("biteship:")) {
+        const [, courierCode = "", serviceCode = ""] = data.shippingId.split(":");
+        const rateRes = await fetchBiteshipRates({
+          destinationPostalCode: data.address.postcode,
+          destinationCity: data.address.city,
+          items: data.items,
+        });
+        const matched = rateRes.methods.find((x) => x.id === data.shippingId);
+        if (matched) {
+          shipping_lines = [
+            {
+              method_id: "biteship",
+              method_title: matched.title,
+              total: String(matched.cost ?? 0),
+            },
+          ];
+          extraMeta.push(
+            { key: "_biteship_courier_code", value: courierCode },
+            { key: "_biteship_service_code", value: serviceCode },
+          );
+        }
+      } else {
+        const methods = await loadShippingMethods();
+        const m = methods.find((x) => x.id === data.shippingId);
+        if (m) {
+          shipping_lines = [
+            { method_id: m.id.split(":")[0] ?? m.id, method_title: m.title, total: String(m.cost ?? 0) },
+          ];
+        }
       }
     }
     const a = data.address;
@@ -278,7 +340,7 @@ export const createOrder = createServerFn({ method: "POST" })
           quantity: i.quantity,
         })),
         shipping_lines,
-        meta_data: [{ key: "_created_via_headless", value: "yes" }],
+        meta_data: extraMeta,
       },
     });
     const o = mapOrder(r.data);
